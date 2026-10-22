@@ -12,6 +12,8 @@
 | DB | PostgreSQL 17 + SQLAlchemy 2.0(동기) + Alembic |
 | 작업 큐 | Celery 5 + Redis 7 |
 | 파일 저장소 | SeaweedFS (S3 호환, 배포 시 AWS S3로 교체 가능) |
+| AI 모델 | 기타 분리 BS-Roformer-SW (audio-separator) · 음 인식 basic-pitch (ONNX) · 박 추정 Beat This! |
+| AI 실행 | Celery worker 전용 이미지 · PyTorch CPU · 가중치는 `model-cache` 볼륨 (라이선스: [`docs/MODELS.md`](docs/MODELS.md)) |
 | 품질 | ruff · mypy · pytest |
 
 ## 처음 세팅 (Windows 기준)
@@ -28,11 +30,21 @@
 ```bash
 uv python install 3.12   # Python 3.12 자동 설치 (이미 있으면 생략됨)
 uv sync                  # .venv 생성 + 패키지 설치 (uv.lock 버전 그대로)
+uv sync --group ai       # AI 코드를 로컬에서 작성·실행할 때만 (PyTorch 등, 수 GB)
 ```
+
+API·CI는 `uv sync`(AI 패키지 없음)만으로 동작합니다. AI 패키지는 worker 이미지에만 들어갑니다.
 
 ### 3. 환경 변수
 노션 **DB·IP** 페이지에서 `.env` 파일을 받아 **레포 최상위 폴더**(`pyproject.toml`과 같은 위치)에 둡니다.
 `.env`는 git에 올리지 않습니다. 설정값을 추가·변경하면 노션의 `.env`도 함께 갱신해 주세요.
+
+AI 설정은 `AI_*` 환경 변수로 덮어쓸 수 있고, 없으면 `app/core/config.py`의 기본값을 씁니다.
+```dotenv
+AI_MODEL_CACHE_DIR=/models
+AI_SEPARATION_MODEL=BS-Roformer-SW.ckpt
+AI_CONFIG_VERSION=2026-10-01
+```
 
 ### 4. 전체 실행
 ```bash
@@ -47,6 +59,16 @@ docker compose up --build
 | http://localhost:9333 | SeaweedFS 관리 화면 |
 
 Celery 모니터링(Flower)까지 띄우려면: `docker compose --profile monitor up` → http://localhost:5555
+
+이미지는 빌드 타깃 두 개로 나뉩니다: `api`(AI 패키지 없음) / `worker`(AI 패키지 포함). 코드는 같고 실행 명령만 다릅니다.
+
+### 5. AI 모델 다운로드 (처음 한 번)
+```bash
+docker compose run --rm worker python scripts/download_models.py
+```
+가중치는 이미지에 넣지 않고 `model-cache` 볼륨(`/models`)에 받습니다. 이미 있으면 건너뛰고, 파일별 SHA-256을 출력합니다.
+
+> **worker는 코드 자동 반영(--reload)이 없습니다.** `app/` 코드를 고친 뒤에는 `docker compose restart worker`로 다시 띄워 주세요.
 
 ## 자주 쓰는 명령어
 
@@ -85,6 +107,8 @@ capstone-backend/
 │       └── health/          #   예) router.py · schemas.py · models.py · service.py · tasks.py
 ├── tests/                   # app/ 과 같은 구조 (tests/core, tests/domains/<기능>)
 ├── alembic/                 # DB 마이그레이션
+├── scripts/                 # 운영 스크립트 (모델 다운로드 등)
+├── docs/                    # 문서 (모델 라이선스 등)
 ├── docker/                  # 컨테이너 설정 파일
 ├── docker-compose.yml
 ├── Dockerfile
@@ -92,6 +116,21 @@ capstone-backend/
 ```
 
 새 기능을 추가하는 방법은 [`app/domains/README.md`](app/domains/README.md)를 보세요.
+
+## AI 코드 작성 규칙
+
+- **AI 라이브러리는 모듈 최상단에서 import하지 않습니다.** (torch, basic_pitch, beat_this, audio_separator, librosa, music21 등)
+  함수 안에서 지연 import 하세요. Celery가 모든 도메인의 `tasks.py`를 자동 import하고, api 이미지와 CI에는 AI 패키지가 없습니다.
+  ```python
+  def separate(path: str) -> str:
+      from audio_separator.separator import Separator  # 함수 안에서
+      ...
+  ```
+- **모델 이름·임계값은 하드코딩하지 않고** `get_settings().ai_*`에서 읽습니다. 값을 바꾸면 `AI_CONFIG_VERSION`도 함께 올립니다.
+- 모델 사전 로드는 `app/core/celery_app.py`의 `preload_ai_models` 훅에 연결합니다.
+- 공통 코드는 `core/`, 기능 코드는 `domains/<기능>/`에 둡니다. 파일 저장 key는 `{workspace_id}/{song_id}/...` 규칙을 따릅니다.
+- 실패는 `ErrorCode`의 AI 파이프라인 코드(`SEPARATION_NO_GUITAR`, `TAB_LOW_CONFIDENCE` 등)로 표현합니다.
+- 새 모델·패키지를 추가하면 [`docs/MODELS.md`](docs/MODELS.md)에 라이선스를 적습니다.
 
 ## 공통 응답 형식
 
