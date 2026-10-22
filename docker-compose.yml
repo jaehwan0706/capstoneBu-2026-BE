@@ -7,7 +7,9 @@
 
 services:
   api:
-    build: .
+    build:
+      context: .
+      target: api
     command: >
       sh -c "alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
@@ -27,11 +29,14 @@ services:
         condition: service_healthy
 
   worker:
-    build: .
+    build:
+      context: .
+      target: worker
     command: celery -A app.core.celery_app worker --loglevel=info --concurrency=1
     env_file: .env
     volumes:
       - ./app:/app/app
+      - model-cache:/models   # AI 모델 가중치 (scripts/download_models.py)
     depends_on:
       redis:
         condition: service_healthy
@@ -101,3 +106,4 @@ services:
 volumes:
   postgres-data:
   seaweedfs-data:
+  model-cache:
