@@ -36,6 +36,7 @@ services:
     env_file: .env
     volumes:
       - ./app:/app/app
+      - ./scripts:/app/scripts
       - model-cache:/models   # AI 모델 가중치 (scripts/download_models.py)
     depends_on:
       redis:
