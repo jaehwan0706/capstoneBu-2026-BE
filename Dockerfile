@@ -21,12 +21,14 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /app
 
 # 의존성 먼저 설치 (소스만 바뀌면 이 레이어는 캐시 재사용)
+# uv 다운로드 캐시는 BuildKit 캐시 마운트에 두어 이미지에 남기지 않는다
 COPY pyproject.toml uv.lock .python-version ./
 
 
 FROM base AS api
 
-RUN uv sync --frozen --no-dev
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
 
 COPY . .
 
@@ -41,7 +43,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN uv sync --frozen --no-dev --group ai
+# gcc: diffq(audio-separator 의존성)는 Py3.12 리눅스 휠이 없어 소스 빌드 → 빌드 후 바로 제거
+RUN --mount=type=cache,target=/root/.cache/uv \
+    apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && uv sync --frozen --no-dev --group ai \
+    && apt-get purge -y --auto-remove gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # 모델 가중치는 이미지에 넣지 않는다. /models는 compose의 model-cache 볼륨
 # (scripts/download_models.py로 받음). 라이브러리 기본 캐시도 같은 볼륨을 쓰게 한다.
