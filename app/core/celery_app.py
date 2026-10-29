@@ -30,6 +30,9 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,  # 워커가 죽으면 작업을 다시 큐로
     worker_prefetch_multiplier=1,  # GPU 작업은 한 번에 하나씩
+    # 큐: cpu(기본) / gpu(기타 분리). 태스크는 @celery_app.task(queue="gpu")로 지정
+    # PoC 초기에는 worker 하나가 두 큐를 함께 처리한다 (docker-compose.yml)
+    task_default_queue="cpu",
 )
 
 

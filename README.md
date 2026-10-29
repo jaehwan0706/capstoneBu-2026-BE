@@ -117,7 +117,102 @@ capstone-backend/
 
 새 기능을 추가하는 방법은 [`app/domains/README.md`](app/domains/README.md)를 보세요.
 
-## AI 코드 작성 규칙
+## AI 파이프라인
+
+AI는 **음원 → 타브 초안 생성**(PoC 1차)과 **사용자 연주 ↔ 원곡 비교**(PoC 2차)에 쓰입니다.
+사전 학습 모델 3개(기타 분리·음 인식·박 추정)를 쓰고, 타브 운지와 결과 판정은 직접 설계한 알고리즘으로 처리합니다.
+AI 결과는 모두 사용자가 원음과 함께 확인하는 **초안**이며, 생성 성공을 카피 정답으로 표시하지 않습니다(COPY-04).
+
+| 단계 | 하는 일 | 기술 | 종류 | 범위 |
+|---|---|---|---|---|
+| 기타 분리 | 원곡 구간에서 기타 소리만 추출 | BS-RoFormer-SW (대체 Demucs htdemucs_6s, `audio-separator`) | 사전 학습 | 1차 |
+| 음 인식 | 음높이·시작·길이·벤딩 인식 | Basic Pitch (ONNX, CPU) | 사전 학습 | 1·2차 |
+| 박 추정 | 박·마디 첫 박 위치 | Beat This! `final0` (대체 librosa `beat_track`) | 사전 학습 | 1차 |
+| 타브 변환 | 음마다 줄·프렛 선택 | Viterbi 운지 최적화 + 연주 가능성 검사 | 직접 설계 | 1차 |
+| 결과 판정 | 빈 결과·낮은 신뢰도를 성공으로 표시하지 않음 | 임계값 규칙 | 직접 설계 | 1·2차 |
+| 연주 비교 | 사용자 연주와 원곡의 차이 의심 구간 | DTW 정렬 + 노트 비교 | 알고리즘 | 2차 |
+
+### 흐름
+
+```
+업로드 ─ preprocess ─ separate ─ transcribe ─ quantize ─ build_tab ─ MusicXML → alphaTab(프론트)
+          (cpu)        (gpu)       (cpu)        (cpu)       (cpu)
+분리 음원 업로드(JOB-02)는 separate를 건너뛰고 구간 WAV를 guitar.wav로 복사
+```
+
+| 태스크 | 입력 | 출력 (저장소 key, 앞에 `{workspace_id}/`) | 큐 |
+|---|---|---|---|
+| `preprocess(segment_id)` | 원본 파일, start·end | `segments/{segment_id}.wav` | cpu |
+| `separate(segment_id)` | 구간 WAV | `stems/{segment_id}/guitar.wav` | gpu |
+| `transcribe(segment_id)` | 기타 스템 | `notes/{segment_id}.json` | cpu |
+| `quantize(segment_id)` | 노트, 구간 WAV | `rhythm/{segment_id}.json` | cpu |
+| `build_tab(segment_id, condition)` | 정량화 노트, 연주 조건 | `tabs/{segment_id}/{version}.json`, `.musicxml` | cpu |
+
+- 단계끼리는 함수를 직접 부르지 않고 **저장소 파일 + 스키마**로만 주고받습니다. 그래서 단계별로 따로 개발·테스트·재시도할 수 있습니다.
+- 각 태스크는 끝날 때 `StageResult`(`success` / `needs_review` / `failed`, `error_code`, `model`, `config_version`)를 DB에 남깁니다.
+- 재시도는 실패한 태스크부터 앞 단계 결과를 재사용해 최대 3회. 입력 해시 + 구간 + 연주 조건 + `config_version`이 같으면 기존 결과를 돌려줍니다.
+
+### 코드 위치
+
+```
+app/domains/
+├── processing/   # 분리·처리 (JOB)  tasks.py: preprocess, separate      pipeline/: preprocess.py, separation.py
+├── tab/          # 타브·악보 (TAB)  tasks.py: transcribe, quantize, build_tab
+│                 #                  pipeline/: transcription.py, rhythm.py, fingering.py, playability.py, musicxml.py
+└── compare/      # 연주 비교 (CMP, 2차)  pipeline/: align.py, notes.py
+tests/domains/<기능>/   # 단위 테스트 (짧은 픽스처 음원, 모델 추론은 mock)
+scripts/eval/           # 모델 평가 스크립트 (무거워서 CI 밖에서 실행)
+```
+
+### 큐·워커
+
+| 큐 | 처리 | 워커 |
+|---|---|---|
+| `cpu` (기본) | 전처리, 음 인식, 리듬, 타브 | `worker` |
+| `gpu` | 기타 분리 | PoC 초기에는 `worker`가 함께 처리 (`-Q cpu,gpu`) |
+
+GPU 서버에서는 `docker compose --profile gpu up`으로 `worker-gpu`(`-Q gpu`)를 띄우고 `worker`는 `-Q cpu`로 바꿉니다.
+GPU 태스크는 `@celery_app.task(queue="gpu")`로 지정합니다. 작업 상태는 Flower(`--profile monitor`)에서 봅니다.
+
+### AI 설정 (`app/core/config.py`, env `AI_*`)
+
+| 설정 | 기본값 | 설명 |
+|---|---|---|
+| `AI_CONFIG_VERSION` | `2026-10-01` | 모든 결과에 저장. 모델·임계값을 바꾸면 함께 올림 (버전이 다르면 캐시 안 씀) |
+| `AI_SEPARATION_MODEL` | `BS-Roformer-SW.ckpt` | 기타 분리 모델 |
+| `AI_SEPARATION_FALLBACK` | `htdemucs_6s` | 분리 대체 모델 |
+| `AI_TRANSCRIPTION_WEIGHTS` | `icassp2022-onnx` | Basic Pitch 가중치 (미세조정 시 `ft-YYYYMMDD`) |
+| `AI_ONSET_THRESHOLD` / `AI_FRAME_THRESHOLD` | `0.5` / `0.3` | Basic Pitch 추론 임계값 |
+| `AI_BEAT_MODEL` | `final0` | Beat This! 체크포인트 |
+| `AI_TAB_WEIGHTS` | `{"span":1.0,"pos":0.1,"move":0.5,"strskip":0.3}` | Viterbi 비용 가중치 (JSON) |
+| `AI_LOW_CONFIDENCE` | `0.4` | 이 값 미만 음은 `low_confidence`로 표시 (지우지 않음) |
+| `AI_SEPARATION_RMS_DB` | `30` | 기타 스템이 입력보다 이만큼 작으면 분리 실패 |
+| `AI_MODEL_CACHE_DIR` | `/models` | 가중치 캐시 (`model-cache` 볼륨) |
+
+임계값은 초기값입니다. 평가 데이터로 조정한 뒤 반영하고, 바꾸면 노션 `.env`도 함께 갱신합니다.
+
+### 상태 판정
+
+| 단계 | 조건 | 상태 | ErrorCode 예 |
+|---|---|---|---|
+| 전처리 | 무음(-50dBFS 미만)·디코딩 실패·길이 0초 | failed (재시도 불가) | `PREPROCESS_INVALID_AUDIO` |
+| 기타 분리 | 기타 스템이 입력보다 30dB 이상 작음 | failed (재시도 불가) | `SEPARATION_NO_GUITAR` |
+| 기타 분리 | 유효 음 구간 10% 미만 | needs_review | `SEPARATION_UNCLEAR` |
+| 음 인식 | 인식된 음 0개 | failed | `TAB_NO_NOTES` |
+| 음 인식 | low_confidence 음이 50% 이상 | needs_review | `TAB_LOW_CONFIDENCE` |
+| 리듬 | 4/4가 아닌 박자로 추정 | needs_review | |
+| 타브 | `playable=False` 노트 있음 | needs_review | |
+| 공통 | 시간 초과·워커 오류 | failed | `AI_WORKER_TIMEOUT` |
+
+확신이 없는 구간은 틀렸다고 표시하지 않고 **판단 보류**로 둡니다.
+
+### 평가
+
+모델·설정을 바꾸는 PR은 `scripts/eval/`을 로컬에서 돌려 이전·이후 지표 표를 PR에 붙입니다.
+지표: 기타 SDR, 노트 F1(±50ms, `mir_eval`), 박 F-measure(±70ms), 운지 일치율, 연주 불가 노트 비율, 구간 30초당 처리 시간.
+CI의 pytest는 판정 규칙과 파이프라인 동작만 검사하고 모델 추론은 mock으로 대체합니다.
+
+### AI 코드 작성 규칙
 
 - **AI 라이브러리는 모듈 최상단에서 import하지 않습니다.** (torch, basic_pitch, beat_this, audio_separator, librosa, music21 등)
   함수 안에서 지연 import 하세요. Celery가 모든 도메인의 `tasks.py`를 자동 import하고, api 이미지와 CI에는 AI 패키지가 없습니다.
@@ -128,7 +223,7 @@ capstone-backend/
   ```
 - **모델 이름·임계값은 하드코딩하지 않고** `get_settings().ai_*`에서 읽습니다. 값을 바꾸면 `AI_CONFIG_VERSION`도 함께 올립니다.
 - 모델 사전 로드는 `app/core/celery_app.py`의 `preload_ai_models` 훅에 연결합니다.
-- 공통 코드는 `core/`, 기능 코드는 `domains/<기능>/`에 둡니다. 파일 저장 key는 `{workspace_id}/{song_id}/...` 규칙을 따릅니다.
+- 공통 코드는 `core/`, 기능 코드는 `domains/<기능>/`에 둡니다. 파일 저장 key는 `{workspace_id}/...`로 시작하고(위 태스크 표), 읽기·쓰기는 `core/storage.py`만 거칩니다.
 - 실패는 `ErrorCode`의 AI 파이프라인 코드(`SEPARATION_NO_GUITAR`, `TAB_LOW_CONFIDENCE` 등)로 표현합니다.
 - 새 모델·패키지를 추가하면 [`docs/MODELS.md`](docs/MODELS.md)에 라이선스를 적습니다.
 

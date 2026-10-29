@@ -28,11 +28,14 @@ class Settings(BaseSettings):
     ai_config_version: str = "2026-10-01"  # 결과 재현용. 모델·임계값을 바꾸면 함께 올린다
     ai_separation_model: str = "BS-Roformer-SW.ckpt"
     ai_separation_fallback: str = "htdemucs_6s"
+    ai_transcription_weights: str = "icassp2022-onnx"  # basic-pitch. 미세조정 시 ft-YYYYMMDD
     ai_beat_model: str = "final0"
     ai_onset_threshold: float = 0.5
     ai_frame_threshold: float = 0.3
     ai_low_confidence: float = 0.4
     ai_separation_rms_db: float = 30.0
+    # 타브 운지 Viterbi 비용 가중치. env는 JSON: AI_TAB_WEIGHTS='{"span": 1.0, ...}'
+    ai_tab_weights: dict[str, float] = {"span": 1.0, "pos": 0.1, "move": 0.5, "strskip": 0.3}
     ai_model_cache_dir: str = "/models"
 
     @property

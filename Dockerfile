@@ -59,4 +59,4 @@ ENV AI_MODEL_CACHE_DIR=/models \
 
 COPY . .
 
-CMD ["celery", "-A", "app.core.celery_app", "worker", "--loglevel=info", "--concurrency=1"]
+CMD ["celery", "-A", "app.core.celery_app", "worker", "-Q", "cpu,gpu", "--loglevel=info", "--concurrency=1"]

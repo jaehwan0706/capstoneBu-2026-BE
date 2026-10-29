@@ -12,11 +12,13 @@ def test_ai_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.ai_config_version == "2026-10-01"
     assert s.ai_separation_model == "BS-Roformer-SW.ckpt"
     assert s.ai_separation_fallback == "htdemucs_6s"
+    assert s.ai_transcription_weights == "icassp2022-onnx"
     assert s.ai_beat_model == "final0"
     assert s.ai_onset_threshold == 0.5
     assert s.ai_frame_threshold == 0.3
     assert s.ai_low_confidence == 0.4
     assert s.ai_separation_rms_db == 30.0
+    assert s.ai_tab_weights == {"span": 1.0, "pos": 0.1, "move": 0.5, "strskip": 0.3}
     assert s.ai_model_cache_dir == "/models"
 
 
@@ -24,12 +26,14 @@ def test_ai_settings_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AI_SEPARATION_MODEL", "other.ckpt")
     monkeypatch.setenv("AI_ONSET_THRESHOLD", "0.7")
     monkeypatch.setenv("AI_MODEL_CACHE_DIR", "/tmp/models")
+    monkeypatch.setenv("AI_TAB_WEIGHTS", '{"span": 2.0, "pos": 0.1, "move": 0.5, "strskip": 0.3}')
 
     s = Settings(_env_file=None)
 
     assert s.ai_separation_model == "other.ckpt"
     assert s.ai_onset_threshold == 0.7
     assert s.ai_model_cache_dir == "/tmp/models"
+    assert s.ai_tab_weights["span"] == 2.0
 
 
 def test_ai_packages_not_imported_by_app() -> None:
